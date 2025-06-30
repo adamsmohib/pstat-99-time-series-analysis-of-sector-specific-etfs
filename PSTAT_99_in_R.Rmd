@@ -1,0 +1,568 @@
+---
+title: "PSTAT_99_in_R"
+output: html_notebook
+---
+
+```{r}
+#**test**
+test <- "test"
+print(test)
+```
+The following code installs neccessary packages for our project.
+```{r}
+install.packages(c("xts", "dplyr", "purrr", "ggplot2", "forecast", "FinTS", "tseries", "rugarch", "visdat"))
+```
+**Step 0: Data Preproccessing**
+
+The following code loads minutely data sets of assets into R data frames. Right now, I am looking at the Sector US Market directory Dr. Peters provided.
+```{r}
+BATS_VAW_1_df <- read.csv("~/Desktop/PSTAT 99/Data/Sector US market/BATS_VAW, 1.csv")
+BATS_VDE_1_df = read.csv("~/Desktop/PSTAT 99/Data/Sector US market/BATS_VDE, 1.csv")
+BATS_VFH_1_df = read.csv("~/Desktop/PSTAT 99/Data/Sector US market/BATS_VFH, 1.csv")
+BATS_VIS_1_df = read.csv("~/Desktop/PSTAT 99/Data/Sector US market/BATS_VIS, 1.csv")
+BATS_VPU_1_df = read.csv("~/Desktop/PSTAT 99/Data/Sector US market/BATS_VPU, 1.csv")
+```
+The following code creates a return column for each dataset computed using the formula: (close - open)/open
+```{r}
+library(dplyr)
+BATS_VAW_1_df <- BATS_VAW_1_df %>%
+  arrange(time) %>%
+  mutate(return = (close - open) / open)
+
+BATS_VDE_1_df <- BATS_VDE_1_df %>%
+  arrange(time) %>%
+  mutate(return = (close - open) / open)
+
+BATS_VFH_1_df <- BATS_VFH_1_df %>%
+  arrange(time) %>%
+  mutate(return = (close - open) / open)
+
+BATS_VIS_1_df <- BATS_VIS_1_df %>%
+  arrange(time) %>%
+  mutate(return = (close - open) / open)
+
+BATS_VPU_1_df <- BATS_VPU_1_df %>%
+  arrange(time) %>%
+  mutate(return = (close - open) / open)
+
+print(BATS_VAW_1_df)
+```
+
+
+The following code finds where the minutely datasets of US Sector Market assets all have existing prices at the same timestamps. This is done with 180 second (3 minute) bins now. the code works by creating a sequence of all the bins between the min start time and the max end time of all the datasets. Then it fits which datasets fit in each bin, and for those bins without all the datasets, those bins are dropped. If multiple transactions of the same asset fall in the same bin, then the latest OHLC and return is recorded and the sum of the volumes is aggregated in the bin. Each time stamp represents the end of a 3 minute bin. 
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(xts)
+library(purrr)
+
+# Convert 'time' columns to POSIXct for each dataframe
+BATS_VAW_1_df$time <- as.POSIXct(BATS_VAW_1_df$time, origin = '1970-01-01', tz = "UTC")
+BATS_VDE_1_df$time <- as.POSIXct(BATS_VDE_1_df$time, origin = '1970-01-01', tz = "UTC")
+BATS_VFH_1_df$time <- as.POSIXct(BATS_VFH_1_df$time, origin = '1970-01-01', tz = "UTC")
+BATS_VIS_1_df$time <- as.POSIXct(BATS_VIS_1_df$time, origin = '1970-01-01', tz = "UTC")
+BATS_VPU_1_df$time <- as.POSIXct(BATS_VPU_1_df$time, origin = '1970-01-01', tz = "UTC")
+
+# List of asset dataframes with names
+assets <- list(
+  BATS_VAW = BATS_VAW_1_df, 
+  BATS_VDE = BATS_VDE_1_df, 
+  BATS_VFH = BATS_VFH_1_df, 
+  BATS_VIS = BATS_VIS_1_df, 
+  BATS_VPU = BATS_VPU_1_df
+)
+
+# Prefix column names with asset names (excluding 'time' column)
+assets <- lapply(names(assets), function(name) {
+  df <- assets[[name]]
+  colnames(df)[-1] <- paste(name, colnames(df)[-1], sep = "_")
+  return(df)
+})
+
+# Create 3-minute bins with consistent boundaries
+min_time <- min(unlist(lapply(assets, function(df) min(df$time, na.rm = TRUE))))
+max_time <- max(unlist(lapply(assets, function(df) max(df$time, na.rm = TRUE))))
+
+# Generate a sequence of 3-minute bins
+all_bins <- seq(from = floor(as.numeric(min_time) / 180) * 180, 
+                to = ceiling(as.numeric(max_time) / 180) * 180, 
+                by = 180)
+all_bins <- as.POSIXct(all_bins, origin = '1970-01-01', tz = "UTC")
+
+# Assign each row to the appropriate bin, handling multiple entries per bin
+assets <- lapply(assets, function(df) {
+  df$time_bin <- cut(df$time, breaks = all_bins, labels = all_bins[-1], right = FALSE)
+  df$time_bin <- as.POSIXct(df$time_bin, origin = '1970-01-01', tz = "UTC")
+  df <- df %>% group_by(time_bin) %>% summarise(
+    across(ends_with("open"), last, na.rm = TRUE),
+    across(ends_with("high"), last, na.rm = TRUE),
+    across(ends_with("low"), last, na.rm = TRUE),
+    across(ends_with("close"), last, na.rm = TRUE),
+    across(ends_with("return"), last, na.rm = TRUE),
+    across(ends_with("Volume"), sum, na.rm = TRUE),
+    .groups = 'drop'
+  )
+  return(df)
+})
+
+# Merge dataframes based on the 3-minute time bins
+merged_data <- Reduce(function(x, y) merge(x, y, by = 'time_bin', all = FALSE), assets)
+
+# Ensure no NA values by keeping only bins with data from all assets
+merged_data <- merged_data[complete.cases(merged_data), ]
+
+# Sort the data by time_bin to maintain a valid order
+merged_data <- merged_data[order(merged_data$time_bin), ]
+
+# Check for duplicate timestamps and remove them if needed
+merged_data <- merged_data[!duplicated(merged_data$time_bin), ]
+
+# Convert to an xts object for time series analysis with Unix time indices
+xts_data <- xts(merged_data[,-1], order.by = merged_data$time_bin)
+
+print(xts_data)
+
+
+
+```
+How many intersecting entries do we have?
+```{r}
+length_xts <- nrow(xts_data)
+print(length_xts)
+```
+How many possible bins exist?
+```{r}
+# Load necessary libraries
+library(dplyr)
+
+# Function to ceil time to the nearest upper 3-minute boundary
+ceiling_to_3min <- function(time) {
+as.POSIXct(ceiling(as.numeric(time) / 180) * 180, origin = '1970-01-01', tz = "UTC")
+}
+
+# List of datasets
+datasets <- list(BATS_VAW_1_df, BATS_VDE_1_df, BATS_VFH_1_df, BATS_VIS_1_df, BATS_VPU_1_df)
+dataset_names <- c("BATS_VAW", "BATS_VDE", "BATS_VFH", "BATS_VIS", "BATS_VPU")
+
+# Step 1: Convert 'time' columns to POSIXct and remove NA timestamps
+datasets <- lapply(datasets, function(df) {
+df <- df %>% filter(!is.na(time))
+df$time <- as.POSIXct(df$time, origin = '1970-01-01', tz = "UTC")
+return(df)
+})
+
+# Step 2: Compute common minimum and maximum timestamps across all datasets
+common_min_time <- max(sapply(datasets, function(df) min(df$time, na.rm = TRUE)), na.rm = TRUE)
+common_max_time <- min(sapply(datasets, function(df) max(df$time, na.rm = TRUE)), na.rm = TRUE)
+
+# Align to the nearest upper 3-minute boundary
+aligned_min_time <- ceiling_to_3min(common_min_time)
+aligned_max_time <- ceiling_to_3min(common_max_time)
+
+# Print common min and max timestamps
+print(paste("Common minimum time:", common_min_time, "(before alignment)"))
+print(paste("Common maximum time:", common_max_time, "(before alignment)"))
+print(paste("Aligned minimum time (UTC) - Represents end of first interval:", aligned_min_time))
+print(paste("Aligned maximum time (UTC) - Represents end of last interval:", aligned_max_time))
+
+# Step 3: Generate 3-minute bins
+if (is.finite(aligned_min_time) & is.finite(aligned_max_time) & aligned_max_time > aligned_min_time) {
+
+possible_bins <- seq(from = aligned_min_time - 180, # Shift back to mark the actual start of bins
+to = aligned_max_time - 180,
+by = "3 min")
+
+num_possible_intervals <- length(possible_bins) - 1 # Number of intervals is one less than number of bin edges
+
+print(paste("Total number of possible 3-minute intervals:", num_possible_intervals))
+
+} else {
+print("Error: Check dataset timestamps.")
+}
+```
+The following code lists out the first possible 10 bins and last possible 10 bins. 
+
+```{r}
+returns <- grep(assets)
+library(visdat)
+vis_dat(assets)
+```
+
+```{r}
+print("First 10 bins (End Times) in UTC:")
+print(as.POSIXct(head(possible_bins, 10) + 180, origin = "1970-01-01", tz = "UTC"))
+
+print("Last 10 bins (End Times) in UTC:")
+print(as.POSIXct(tail(possible_bins, 10) + 180, origin = "1970-01-01", tz = "UTC"))
+
+print(paste("Total number of bins:", length(possible_bins) - 1))
+
+```
+
+
+We have 106 intersecting times among the assets provided in "Sector US Market" when using 3 minute bins. This is out of 6803 possible 3-minute bins.
+
+The manual calculation of the number of possible 3 minute bins is given by (common_max_time-common_min_time)/(180 seconds). 
+
+The following code calculates the number of possible 5 minute bins. This is a sa neccessary for me to check my bin logic code is right. That is, (#5minbins/#3minbins) = approx(3/5)
+```{r}
+# Load necessary libraries
+library(dplyr)
+
+# List of asset dataframes
+assets <- list(
+  BATS_VAW_1_df, 
+  BATS_VDE_1_df, 
+  BATS_VFH_1_df, 
+  BATS_VIS_1_df, 
+  BATS_VPU_1_df
+)
+
+# Step 1: Convert 'time' columns to POSIXct format
+assets <- lapply(assets, function(df) {
+  df$time <- as.POSIXct(df$time, origin = '1970-01-01', tz = "UTC")
+  return(df)
+})
+
+# Step 2: Determine the common time range
+common_min_time <- max(sapply(assets, function(df) min(df$time, na.rm = TRUE)))
+common_max_time <- min(sapply(assets, function(df) max(df$time, na.rm = TRUE)))
+
+# Debugging: Print common min and max times
+cat("Common Start Time (UTC):", common_min_time, "\n")
+cat("Common End Time (UTC):", common_max_time, "\n")
+
+# Step 3: Calculate the number of 5-minute intervals
+if (is.finite(common_min_time) & is.finite(common_max_time) & common_max_time > common_min_time) {
+  
+  # Calculate total seconds between the two times
+  total_seconds <- as.numeric(difftime(common_max_time, common_min_time, units = "secs"))
+  
+  # Calculate the number of 5-minute intervals
+  num_intervals <- floor(total_seconds / 300)  # 300 seconds = 5 minutes
+
+  cat("Total number of complete 5-minute intervals:", num_intervals, "\n")
+  
+} else {
+  cat("Error: Invalid common min/max timestamps. Please check the dataset timestamps.\n")
+}
+
+```
+The following code plots the returns of each asset in the existing 3 minute bins. 
+
+```{r}
+print(BATS_VAW_1_df$time)
+```
+
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(tidyr)
+
+# Convert xts_data to a dataframe for plotting
+df_plot <- fortify.zoo(xts_data)
+
+# Convert time index to POSIXct
+df_plot$time_bin <- as.POSIXct(index(xts_data), origin = "1970-01-01", tz = "UTC")
+
+# Select only return columns for plotting
+return_cols <- grep("_return$", colnames(df_plot), value = TRUE)
+df_returns <- df_plot[, c("time_bin", return_cols)]
+
+# Reshape the data for ggplot
+df_long <- pivot_longer(df_returns, cols = -time_bin, names_to = "Asset", values_to = "Return")
+
+# Plot the time series of returns
+ggplot(df_long, aes(x = time_bin, y = Return, color = Asset)) +
+  geom_line(size = 1) +
+  labs(title = "Time Series of Asset Returns",
+       x = "Timestamp",
+       y = "Return",
+       color = "Asset") +
+  theme_minimal()
+
+```
+```{r}
+ggplot(BATS_VAW_1_df, x = BATS_VAW_1_df$time, y = BATS_VAW_1_df$return)
+```
+
+
+**Step 1: Plot the ACF and PACF of the data, and do a test of autocorrelation. This is to show that there is no simple AR structure or ARIMA structure. Then we plot the square returns or absolute returns, and we plot the ACF, PACF to see if there is some volatility structure. With this information, we would try and fit a GARCH model.**
+
+The following code uses the Augmented Dickey-Fuller (ADF) Test to test for a unit root (non-stationary). If the test on asset yields a p-value less than .05, then the null hypothesis (non-stationary) is rejected, and the asset is stationary. If the test on an asset yields a p-value greater than .05, then the null hypothesis (non-stationary) fails to be rejected, and the asset is non stationary. Stationarity is assumed for the ACF and PACF.
+```{r}
+library(tseries)
+
+for (asset in return_cols) {
+  asset_data <- na.omit(xts_data[, asset])
+  adf_result <- adf.test(asset_data)
+  print(paste(asset, "ADF Test p-value:", adf_result$p.value))
+}
+
+```
+Each asset yields a p-value less than .05, when using the ADF test. Thus we can assume that each asset is stationary. 
+
+Since stationarity is assumed, we can plot the ACF and PACF test. 
+
+The following code plots the ACF and PACF of each asset's returns. It uses a 95 percent confidence interval to determine and list statistically significant lags for each asset. 
+
+```{r}
+
+# Load required libraries (Already loaded in previous code)
+# library(forecast)
+# library(xts)
+# library(ggplot2)
+
+# Identify return columns
+return_cols <- grep("_return$", colnames(xts_data), value = TRUE)
+
+# Initialize a list to store significant lags for each asset
+significant_lags <- list()
+
+# Loop through assets, plot ACF/PACF, and find significant lags
+for (asset in return_cols) {
+  asset_data <- na.omit(xts_data[, asset])  # Remove NA values
+  asset_name <- gsub("_return$", "", asset)  # Extract asset name
+  
+  # Compute ACF & PACF values
+  acf_vals <- acf(asset_data, plot = FALSE, lag.max = 50)
+  pacf_vals <- pacf(asset_data, plot = FALSE, lag.max = 50)
+  
+  # Compute 95% confidence interval threshold
+  n <- length(asset_data)
+  crit_value <- qnorm(0.975) / sqrt(n)  # 1.96 / sqrt(n) for 95% confidence
+  
+  # Identify statistically significant lags
+  sig_acf_lags <- which(abs(acf_vals$acf[-1]) > crit_value)  # Ignore lag 0
+  sig_pacf_lags <- which(abs(pacf_vals$acf) > crit_value)
+  
+  # Store results
+  significant_lags[[asset_name]] <- list(
+    significant_acf_lags = sig_acf_lags,
+    significant_pacf_lags = sig_pacf_lags
+  )
+  
+  # Print results
+  print(paste("Asset:", asset_name))
+  print(paste("Significant ACF Lags:", ifelse(length(sig_acf_lags) > 0, paste(sig_acf_lags, collapse = ", "), "None")))
+  print(paste("Significant PACF Lags:", ifelse(length(sig_pacf_lags) > 0, paste(sig_pacf_lags, collapse = ", "), "None")))
+  print("-----------------------------------------")
+
+  # Plot ACF and PACF
+  par(mfrow = c(1, 2))
+  acf(asset_data, main = paste("ACF of", asset_name), lag.max = 50)
+  pacf(asset_data, main = paste("PACF of", asset_name), lag.max = 50)
+}
+
+# Store results in a dataframe for easy analysis
+significant_lags_df <- do.call(rbind, lapply(names(significant_lags), function(asset) {
+  data.frame(
+    Asset = asset,
+    Significant_ACF_Lags = paste(significant_lags[[asset]]$significant_acf_lags, collapse = ", "),
+    Significant_PACF_Lags = paste(significant_lags[[asset]]$significant_pacf_lags, collapse = ", ")
+  )
+}))
+
+# Display the results
+print(significant_lags_df)
+
+#lag.max = 50 implies that for each interval t, we are checking dependencies from (t-50) to (t-1) intervals.
+
+```
+Statistically significant ACF lags suggests that the time series is correlated from that many periods ago. Statistically signficant PACF lags suggest that the time series has a direct relationship with its past value at that many periods ago.
+
+if an asset is stationary and has no significant ACF or PACF structure, then its returns are likely uncorrelated to each other, and follow some unknown distribution that is, r_t = epsilon, where epsilon follows some distrbution
+
+The ACF and PACF suggest that BATS_VAW, BATS_VDE, and BATS_VIS are likely white noise.
+
+The following code runs the  Ljung-Box Test, which checks whether a time series has significant autocorrelation at multiple lags jointly, rather than just checking individual lags like an ACF plot. The null hypothesis of the test is that the time series has no significant autocorrelation. the test checks for joint lags up to max lag, which differs from the ACF and PACF confidence interval which only plotted individual statistiscally significant lags. 
+
+```{r}
+# Load required library
+library(tseries)
+
+# Define the number of lags to test (usually √N or 20-50 for financial data)
+max_lag <- 50
+
+# Loop through each asset and run the Ljung-Box Test
+for (asset in return_cols) {
+  asset_data <- na.omit(xts_data[, asset])  # Remove NAs
+  lb_test <- Box.test(asset_data, lag = max_lag, type = "Ljung-Box")  # Ljung-Box test
+  
+  # Print results
+  print(paste(asset, "Ljung-Box Test p-value:", lb_test$p.value))
+}
+
+```
+ All p-values are greater than 0.05, we fail to reject the null hypothesis. None of the assets exhibit significant autocorrelation. This confirms that the raw returns for every asset follow a white noise proccess, such that r_{i,t}
+= epsilon{i, t}, where epsilon is an uncorrelated innovation error. Note the test does not check for full independence. The results of the test don't imply that each epsilon is indpendent and indentically distributed.
+
+The following code plots the ACF and PACF of the squared returns for each marginal asset. It then stores and prints significant ACF and PACF lags for each marginal asset. 
+
+```{r}
+# Initialize a list to store significant lags for squared returns
+significant_lags_squared <- list()
+
+# Loop through assets, plot ACF/PACF of squared returns, and find significant lags
+for (asset in return_cols) {
+  asset_data <- na.omit(xts_data[, asset]) # Remove NA values
+  asset_squared <- asset_data^2  # Square the returns
+  asset_name <- gsub("_return$", "", asset) # Extract asset name
+
+  # Compute ACF & PACF values for squared returns
+  acf_vals_sq <- acf(asset_squared, plot = FALSE, lag.max = 50)
+  pacf_vals_sq <- pacf(asset_squared, plot = FALSE, lag.max = 50)
+
+  # Compute 95% confidence interval threshold
+  n <- length(asset_squared)
+  crit_value <- qnorm(0.975) / sqrt(n) # 1.96 / sqrt(n) for 95% confidence
+
+  # Identify statistically significant lags
+  sig_acf_lags_sq <- which(abs(acf_vals_sq$acf[-1]) > crit_value) # Ignore lag 0
+  sig_pacf_lags_sq <- which(abs(pacf_vals_sq$acf) > crit_value)
+
+  # Store results
+  significant_lags_squared[[asset_name]] <- list(
+    significant_acf_lags_sq = sig_acf_lags_sq,
+    significant_pacf_lags_sq = sig_pacf_lags_sq
+  )
+
+  # Print results
+  print(paste("Asset:", asset_name))
+  print(paste("Significant ACF Lags (Squared Returns):", ifelse(length(sig_acf_lags_sq) > 0, paste(sig_acf_lags_sq, collapse = ", "), "None")))
+  print(paste("Significant PACF Lags (Squared Returns):", ifelse(length(sig_pacf_lags_sq) > 0, paste(sig_pacf_lags_sq, collapse = ", "), "None")))
+  print("-----------------------------------------")
+
+  # Plot ACF and PACF for squared returns
+  par(mfrow = c(1, 2))
+  acf(asset_squared, main = paste("ACF -", asset_name), lag.max = 50)
+  pacf(asset_squared, main = paste("PACF -", asset_name), lag.max = 50)
+}
+
+# Store results in a dataframe for easy analysis
+significant_lags_squared_df <- do.call(rbind, lapply(names(significant_lags_squared), function(asset) {
+  data.frame(
+    Asset = asset,
+    Significant_ACF_Lags_Squared = paste(significant_lags_squared[[asset]]$significant_acf_lags_sq, collapse = ", "),
+    Significant_PACF_Lags_Squared = paste(significant_lags_squared[[asset]]$significant_pacf_lags_sq, collapse = ", ")
+  )
+}))
+
+# Display the results
+print(significant_lags_squared_df)
+
+```
+From our results, statistically significant acf lags indicate that past squared returns (a proxy for volatility) of x bins previously are correlated with current squared returns. Statistically significant pacf lags suggest a direct relationship between current volatility and volatility at x bins ago, accounting for intermediate lags.
+
+Now we will run Engle's ARCH test on our data. This checks if the returns exhibit heteroskedasticity, which is changing variance. The null hypothesis of the ARCH test is that there is no significant heteroskedasticity. We are using 10 lags on our data, implying that the test checks if the variance (volatility) at time
+t depends on the squared residuals from the past 10 lags.
+
+```{r}
+library(tseries)
+library(FinTS)
+
+# Loop through each asset and apply the ARCH test
+for (asset in return_cols) {
+  asset_data <- na.omit(xts_data[, asset])  # Remove NA values
+  
+  # Run Engle's ARCH test
+  arch_test <- ArchTest(asset_data, lags = 10)  # Use 10 lags
+  
+  # Print results
+  print(paste(asset, "ARCH Test p-value:", arch_test$p.value))
+}
+
+```
+All p-values for the ARCH test are greater than .05, implying that there is no significant volatility clustering. This implies that a GARCH model is unnecessary for fitting each asset's returns marginally, as there is no meaningful structure.
+
+Regardless, the following code tailors a separate GARCH model to each marginal asset's returns individually, and plots each garch model.
+
+```{r}
+# Load necessary library
+library(rugarch)
+
+# Define a GARCH(1,1) specification
+garch_spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1,1)), 
+  mean.model = list(armaOrder = c(0,0), include.mean = TRUE), 
+  distribution.model = "std"
+)
+
+# Initialize an empty list to store GARCH models
+garch_models <- list()
+
+# Loop through each asset, fit GARCH, and store the model
+for (asset in return_cols) {
+  asset_data <- na.omit(xts_data[, asset]) # Remove NA values
+
+  # Fit GARCH model
+  garch_fit <- ugarchfit(spec = garch_spec, data = asset_data)
+
+  # Store the fitted model in the list
+  garch_models[[asset]] <- garch_fit  
+
+  # Extract conditional volatility (σ_t)
+  volatility <- sigma(garch_fit)
+
+  # Plot the estimated volatility
+  plot(index(asset_data), volatility, type = "l", col = "blue",
+       main = paste("Estimated GARCH Volatility for", asset),
+       xlab = "Time", ylab = "Conditional (Estimated) Volatility")
+
+  # Print a labeled model summary
+  cat("\n", "========================================", "\n")
+  cat(" GARCH Model Summary for:", asset, "\n")
+  cat("========================================", "\n")
+  print(garch_fit)
+  cat("\n", "========================================", "\n")
+}
+
+```
+For the GARCH test, all the p-values greater than .05 imply that there is no significant asymmetry and a Standard GARCH(1,1) model is sufficient for modeling. However, for BATS_VPU returns, the p-value .09550366 is borderline significant (slightly below p = .10), implying that large positive returns may slightly impact volatility.
+
+As for the graphs of conditional volatility themselves, there is no significant volatility clustering for all of the marginal assets. There is some volatility clustering for BATS_VPU. 
+
+The following code extracts the parameters for each marginal GARCH model.
+
+```{r}
+# Initialize a dataframe to store results
+garch_results <- data.frame(
+  Asset = character(),
+  Omega = numeric(),
+  Alpha1 = numeric(),
+  Beta1 = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through stored GARCH models and extract parameters
+for (asset in names(garch_models)) {
+  garch_fit <- garch_models[[asset]]  # Retrieve the stored model
+
+  # Extract parameters
+  garch_params <- coef(garch_fit)
+  omega <- garch_params["omega"]
+  alpha1 <- garch_params["alpha1"]
+  beta1 <- garch_params["beta1"]
+
+  # Append results properly
+  garch_results <- rbind(garch_results, data.frame(
+    Asset = asset,  # Store the asset name as a column, not as row names
+    Omega = omega,
+    Alpha1 = alpha1,
+    Beta1 = beta1
+  ))
+}
+
+# Reset row names to avoid them being mistaken for an asset column
+rownames(garch_results) <- NULL  
+
+# Print the extracted GARCH(1,1) parameters for each asset
+print(garch_results)
+
+```
+The omega values for each marginal asset is almost 0, indicating that volatility mostly comes from past behavior rather than a constant baseline variance. Small alpha1 values suggest that new shocks (unexpected large returns) have almost no impact on volatility. High beta1 values suggest volatility is persistent, meaning that once volatility increases it stays high for a long time before decreasing. High beta values suggest that volatility clustrering is strong.
+
+
+
