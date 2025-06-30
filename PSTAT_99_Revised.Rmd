@@ -1,0 +1,484 @@
+---
+title: "PSTAT 99 Revised Version"
+output: html_notebook
+---
+
+```{r}
+test <- "test"
+print(test)
+```
+
+install neccesary packages
+```{r}
+install.packages(c("xts", "zoo","quantmod", "tseries", "ggfortify"))
+```
+**Step 0: Data Preproccessing**
+The quantmod package in R allows for daily data with yahoofinance API. To get intraday data, using other packages with API kwys are required and potentially cost money. Some of these packages/APIs include: (package(alphavantager), Alpha Vantage API), (package(tidyquant), Tiingo API), (package(IBrokers), Interactive Brokers API). For now I will use daily data from 2023-03-  11  2025-03-11 for reference using the free yahoo finance API in quantmod.
+
+The following code uses the yahoo finance Public API to retrieve daily time series data from 2023-03-11 to 2025-03-11 for assets with indices "VAW", "VDE", "VFH", "VIS", "VPU". It then downloads each asset's raw OHLC, Adjusted Close, and Volume as a seperate .csv file in directory /asset_data. 
+
+```{r}
+library(quantmod)
+library(xts)
+library(zoo)
+
+# Define tickers
+tickers <- c("VAW", "VDE", "VFH", "VIS", "VPU")
+
+# Define time range
+start_date <- as.Date("2023-03-11")
+end_date <- as.Date("2025-03-11")
+
+# Create a directory to store data
+dir.create("asset_data", showWarnings = FALSE)
+
+# Loop through each ticker & fetch true raw OHLC values
+for (ticker in tickers) {
+  print(paste("Fetching data for:", ticker))
+  
+  # Download raw OHLC & volume data
+  getSymbols(ticker, src = "yahoo", from = start_date, to = end_date, auto.assign = TRUE)
+
+  # Extract stock data
+  stock_data <- get(ticker)
+
+  # Convert to a data frame & ensure row names (dates) are included as a column
+  stock_data <- data.frame(Date = index(stock_data), coredata(stock_data))
+
+  # Rename columns properly
+  colnames(stock_data) <- c("Date", "Open", "High", "Low", "Close", "Volume", "Adjusted_Close")
+
+  # Select only required columns, ensuring proper alignment
+  stock_data <- stock_data[, c("Date", "Open", "High", "Low", "Close", "Adjusted_Close", "Volume")]
+
+  # Save as CSV (without row names to prevent the "Index" column issue)
+  file_name <- paste0("asset_data/", ticker, "_1d.csv")
+  write.csv(stock_data, file = file_name, row.names = FALSE)
+
+  print(paste("Saved:", file_name))
+}
+
+print("All files have been successfully downloaded into the 'asset_data' directory.")
+
+
+```
+The following code loads each time series dataset into an R dataframe. It then calculates the simple return for each asset using the formula: (close_t - close_(t-1))/close_(t-l)
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Function to calculate simple returns using previous day's Close price
+calculate_simple_returns <- function(df) {
+  df <- df %>%
+    arrange(Date) %>%  # Ensure chronological order
+    mutate(Return = (Close - lag(Close)) / lag(Close))  # Compute simple returns
+  
+  return(df)
+}
+
+# Read CSV files and compute simple returns
+VAW_df <- read.csv("~/Desktop/PSTAT 99/asset_data/VAW_1d.csv") %>% calculate_simple_returns()
+VDE_df <- read.csv("~/Desktop/PSTAT 99/asset_data/VDE_1d.csv") %>% calculate_simple_returns()
+VFH_df <- read.csv("~/Desktop/PSTAT 99/asset_data/VFH_1d.csv") %>% calculate_simple_returns()
+VIS_df <- read.csv("~/Desktop/PSTAT 99/asset_data/VIS_1d.csv") %>% calculate_simple_returns()
+VPU_df <- read.csv("~/Desktop/PSTAT 99/asset_data/VPU_1d.csv") %>% calculate_simple_returns()
+# Verify the output
+head(VAW_df)
+#head(VDE_df)
+#head(VFH_df)
+#head(VIS_df)
+#head(VPU_df)
+```
+The following code converts each asset's simple return columnn into an xts time series object, and then merges all assets' simple returns to a common xts time series object.
+
+```{r}
+# Load necessary library
+library(xts)
+
+# Convert each asset's simple return column to an xts object
+VAW_xts <- xts(VAW_df$Return, order.by = as.Date(VAW_df$Date))
+VDE_xts <- xts(VDE_df$Return, order.by = as.Date(VDE_df$Date))
+VFH_xts <- xts(VFH_df$Return, order.by = as.Date(VFH_df$Date))
+VIS_xts <- xts(VIS_df$Return, order.by = as.Date(VIS_df$Date))
+VPU_xts <- xts(VPU_df$Return, order.by = as.Date(VPU_df$Date))
+
+# Merge all assets into a common time series object
+returns_xts <- merge(VAW_xts, VDE_xts, VFH_xts, VIS_xts, VPU_xts)
+
+# Rename columns for clarity
+colnames(returns_xts) <- c("VAW", "VDE", "VFH", "VIS", "VPU")
+
+# Display first few rows
+#head(returns_xts)
+head(VAW_xts)
+```
+The following code uses the visdat library to visualize the data structure of our multivariate retruns time series.
+
+```{r}
+
+library(visdat)
+# Convert the xts object to a tidy data frame
+returns_xts_df <- data.frame(Date = index(returns_xts), coredata(returns_xts))
+#visualize data with vis_dat
+vis_dat(returns_xts_df)
+```
+From the visualization, we see that there is no inconsistencies within our time series.
+
+The following code plots our assets.
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Reshape data for ggplot (long format)
+returns_long <- returns_xts_df %>%
+  pivot_longer(cols = -Date, names_to = "Asset", values_to = "Return")
+
+# Plot all assets together with 5 subplots
+ggplot(returns_long, aes(x = Date, y = Return)) +
+  geom_line(color = "blue") +
+  facet_wrap(~ Asset, scales = "free_y") +  # Create 5 subplots, one per asset
+  labs(title = "Simple Returns of Assets Over Time",
+       x = "Date",
+       y = "Simple Return") +
+  theme_minimal()
+
+```
+**Step 1: Plot the ACF and PACF of the data, and do a test of autocorrelation. This is to show that there is no simple AR structure or ARIMA structure. Then we plot the square returns or absolute returns, and we plot the ACF, PACF to see if there is some volatility structure. With this information, we would try and fit a GARCH model.**
+
+Note: Every statistical test has 5 steps. Step1: State H_0 and H_A. H_0 represnts no effect or difference, H_A represents the difference or effect to test for. Step 2: Choose the appropriate statstical test and calculate the test statistic. Step 3: Determine the reference distribution and compare the test statistic. Step 4: State and interpret the p-value. Step 5: Make a conclusion. Reject the null or fail to reject the null. There is either enough evidence to support H_A or not enough evidence for H_A.
+
+To plot the ACF and PACF of our data, stationarity is assumed for each marginal asset.
+
+The following code the tseries package to use the Augmented Dickey_Fuller test to test whether each asset has a unit root. The test accounts for up to 7 lags (past values). 
+```{r}
+# Load required package
+library(tseries)
+
+# Function to perform ADF test and compute p-value with default lags
+perform_adf_test <- function(asset_name, asset_returns) {
+  # Remove NAs
+  asset_returns <- na.omit(asset_returns)
+  
+  # Perform ADF test with default lag selection
+  test_result <- adf.test(asset_returns, alternative = "stationary")  # Automatically chooses lags
+
+  # Extract the actual number of lags used
+  default_lags <- test_result$parameter
+
+  # Print full test result
+  cat("\n###############################\n")
+  cat("ADF Test for", asset_name, "with", default_lags, "Lags\n")
+  print(test_result)  # This will output the full box-style ADF test result
+  cat("###############################\n")
+}
+
+# Run ADF tests for all assets
+perform_adf_test("VAW", returns_xts$VAW)
+perform_adf_test("VDE", returns_xts$VDE)
+perform_adf_test("VFH", returns_xts$VFH)
+perform_adf_test("VIS", returns_xts$VIS)
+perform_adf_test("VPU", returns_xts$VPU)
+
+```
+Step 1: Hypotheses
+H_0: The asset has a unit root with a drift (non-stationary). That is, the data follows a random walk with constant shift over time (X_t = X_{t-1} + c + epsilon_t). That is, H_0: gamma = 0, rho = 1.
+
+H_A: The asset is stationary around a constant mean. That is, the data tends to revert to a fixed level/stable mean, and does not have a unit root. That is H_A: gamma < 0, rho < 1. Where gamma is the parameter in the least squares regression equation: Delta(Y_t) = alpha + beta*t +gamma*Y_{t-1} + Sigma_{i=1}^{p} delta_i * Delta(Y_{t-i}) + epsilon_t
+
+Step 2: Choose the appropriate statstical test.
+We will use the Augmented Dickey_Fuller test with 15 lags. 
+
+Step 3: Determine the reference distribution and compare the test statistic.
+
+The test statistic is the Augmented Dickey_Fuller statistic. We are comparing this test statistic to a non-standard Dickey_Fuller distribution, using precomputed critical values from the Dickey-Fuller table.  This distribution however is an empirical one.
+
+The test statistic ADF =  gamma^hat / SE(gamma^hat), where gamma_hat is the coefficent in the leastsquares regression of Delta(Y_t) = alpha + beta_t +gamma*Y_{t-1} + Sigma_{i=1}^{p} delta_i * Delta(Y_{t-i}) + epsilon_t. Delta(Y_t) represents the first difference in the empirical returns, alpha represents a nonzero mean in the data, beta_t represents a deterministic trend only in the trend version of the test, delta_i controls for autocorrelation in the residuals, and epsilon_t is some innovation error. Gamma represents the coefficent on the first lagged level term. That is, if gamma = 0, then Delta(Y_t) = c, where c is an innovation error with trend and drift component (if specified), implying Y_t - Y_{t-1} = c, confirming the time series follows a random walk proccess.
+
+
+Step 4: State and interpret the p-value.
+
+
+Each p-value represents the probability of observing the Dickey-Fuller statistic under H_0.
+
+Step 5: Make a conclusion. Reject the null or fail to reject the null.
+At the alpha = .01 significance level, we reject H_0 for all assets. There is very strong statistical evidence suggesting against that each asset is not stationary around a constant mean. 
+
+Since stationarity is assumed, we plot the ACF and PACF of each marginal asset's returns. 
+
+The following code plots the acf [acf for each marginal asset, and uses a 95% confidence interval to determine statistically significant lags. 
+
+Step 1: State the paramter and confidence level
+
+We want to estimate p_k = the true autocorrelation at lag k for marginal asset and phi_k = the true partial autocorrelation at lag k for marginal asset with a 95% confidence interval.
+
+H_0: The autocorrelation/partial at lag k is not statistically significant, that is p_k = 0/phi_k = 0. 
+H_A: The autocorrelation/partial at lag k is statistically signficant, that is p_k != 0/phi_k != 0.
+
+Step 2: Use the appropiate method
+
+We will use the sample autocorrelation p_k^hat and sample partial autocorrelation phi_k^hat as estimates. 
+
+
+Step 3: Calculate the confidence interval
+
+The following code plots the sample acf and pacf of each marginal asset's returns.
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(ggfortify)
+library(gridExtra)
+library(forecast)
+
+# Function to plot ACF/PACF and list statistically significant lags
+plot_acf_pacf_with_lags <- function(asset_name, asset_returns, max_lag = 50) {
+  asset_returns <- na.omit(asset_returns)
+  N <- length(asset_returns)
+  ci <- 1.96 / sqrt(N)  # 95% confidence interval
+
+  # Compute ACF and PACF
+  acf_result <- acf(asset_returns, lag.max = max_lag, plot = FALSE)
+  pacf_result <- pacf(asset_returns, lag.max = max_lag, plot = FALSE)
+
+  # Identify significant lags
+  significant_acf <- which(abs(acf_result$acf[-1]) > ci)  # skip lag 0
+  significant_pacf <- which(abs(pacf_result$acf) > ci)
+
+  # Print significant lags
+  cat("\n=============================\n")
+  cat("Asset:", asset_name, "\n")
+  cat("Significant ACF lags (95% CI):", significant_acf, "\n")
+  cat("Significant PACF lags (95% CI):", significant_pacf, "\n")
+  cat("=============================\n")
+
+  # Plot ACF and PACF with CI lines
+  acf_plot <- autoplot(acf_result) +
+    ggtitle(paste("ACF -", asset_name)) +
+    theme_minimal() +
+    geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "red")
+
+  pacf_plot <- autoplot(pacf_result) +
+    ggtitle(paste("PACF -", asset_name)) +
+    theme_minimal() +
+    geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "red")
+
+  # Display plots side by side
+  grid.arrange(acf_plot, pacf_plot, ncol = 2)
+}
+
+# Run for each asset's returns
+plot_acf_pacf_with_lags("VAW", returns_xts$VAW)
+plot_acf_pacf_with_lags("VDE", returns_xts$VDE)
+plot_acf_pacf_with_lags("VFH", returns_xts$VFH)
+plot_acf_pacf_with_lags("VIS", returns_xts$VIS)
+plot_acf_pacf_with_lags("VPU", returns_xts$VPU)
+
+```
+The test statistic is rho_k for each lag k for acf and phi_hh for pacf. the critical values come from the standard normal, sqrt(n)/1.96
+
+The following code plots the sample acf and pacf of each marginal asset's squared returns.
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(ggfortify)
+library(gridExtra)
+library(forecast)
+
+# Function to compute and plot ACF/PACF for squared returns, and list significant lags
+analyze_acf_pacf_squared <- function(asset_name, asset_returns) {
+  asset_returns <- na.omit(asset_returns)
+  squared_returns <- asset_returns^2  # Compute squared returns
+  N <- length(squared_returns)  # Sample size
+  ci <- 1.96 / sqrt(N)  # 95% confidence interval threshold
+
+  # Compute ACF and PACF
+  acf_values <- acf(squared_returns, lag.max = 50, plot = FALSE)
+  pacf_values <- pacf(squared_returns, lag.max = 50, plot = FALSE)
+
+  # Identify statistically significant lags
+  significant_acf <- which(abs(acf_values$acf[-1]) > ci)  # Ignore lag 0
+  significant_pacf <- which(abs(pacf_values$acf) > ci)
+
+  # Print significant lags
+  cat("\n###############################\n")
+  cat("Statistically Significant Lags for Squared Returns of", asset_name, "\n")
+  cat("ACF Lags:", significant_acf, "\n")
+  cat("PACF Lags:", significant_pacf, "\n")
+  cat("###############################\n")
+
+  # Generate ACF and PACF plots
+  acf_plot <- autoplot(acf_values) +
+    ggtitle(paste("ACF of Squared Returns -", asset_name)) +
+    theme_minimal() +
+    geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "red")  # Add confidence intervals
+
+  pacf_plot <- autoplot(pacf_values) +
+    ggtitle(paste("PACF of Squared Returns -", asset_name)) +
+    theme_minimal() +
+    geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "red")  # Add confidence intervals
+
+  # Arrange and display both plots side by side
+  grid.arrange(acf_plot, pacf_plot, ncol = 2)
+}
+
+# Run ACF/PACF analysis for squared returns of each asset
+analyze_acf_pacf_squared("VAW", returns_xts$VAW)
+analyze_acf_pacf_squared("VDE", returns_xts$VDE)
+analyze_acf_pacf_squared("VFH", returns_xts$VFH)
+analyze_acf_pacf_squared("VIS", returns_xts$VIS)
+analyze_acf_pacf_squared("VPU", returns_xts$VPU)
+
+```
+
+The following code runs Engle's ARCH test on our data.
+
+```{r}
+# Load necessary libraries
+library(FinTS)  # For ArchTest function
+library(tseries)
+
+# Function to run Engle's ARCH test
+run_arch_test <- function(asset_name, asset_returns) {
+  # Run Engle's ARCH test (default lag = 1)
+  test_result <- ArchTest(asset_returns, lags = 1)
+
+  # Extract test statistic and p-value
+  test_statistic <- test_result$statistic
+  p_value <- test_result$p.value
+
+  # Print results
+  cat("\n#####################################\n")
+  cat("Engle's ARCH Test for", asset_name, "\n")
+  cat("Null Hypothesis (H0): No ARCH effects (no conditional heteroskedasticity)\n")
+  cat("Alternative Hypothesis (H1): Presence of ARCH effects (conditional heteroskedasticity exists)\n")
+  cat("Test Statistic:", test_statistic, "\n")
+  cat("P-Value:", p_value, "\n")
+  
+  # Decision Rule
+  if (p_value < 0.05) {
+    cat("Conclusion: Reject H0 (ARCH effects present) at 5% significance level.\n")
+  } else {
+    cat("Conclusion: Fail to reject H0 (No significant ARCH effects detected).\n")
+  }
+  cat("#####################################\n")
+}
+
+# Run ARCH test for each asset's normal returns
+run_arch_test("VAW", returns_xts$VAW)
+run_arch_test("VDE", returns_xts$VDE)
+run_arch_test("VFH", returns_xts$VFH)
+run_arch_test("VIS", returns_xts$VIS)
+run_arch_test("VPU", returns_xts$VPU)
+
+```
+
+
+```{r}
+# Load necessary libraries
+library(rugarch)  # For GARCH modeling
+library(ggplot2)  # For plotting
+
+# Function to fit and plot a GARCH(1,1) model
+fit_garch_model <- function(asset_name, asset_returns) {
+  asset_returns <- na.omit(asset_returns)
+  # Define GARCH(1,1) specification
+  garch_spec <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1)), 
+    mean.model = list(armaOrder = c(0, 0)), 
+    distribution.model = "norm"
+  )
+
+  # Fit the GARCH model
+  garch_fit <- ugarchfit(spec = garch_spec, data = asset_returns)
+
+  # Extract model parameters
+  garch_params <- coef(garch_fit)
+  
+  # Print GARCH(1,1) model parameters
+  cat("\n#####################################\n")
+  cat("GARCH(1,1) Model for", asset_name, "\n")
+  cat("Mu (Mean Return):", garch_params["mu"], "\n")
+  cat("Omega (Constant in Variance Eq.):", garch_params["omega"], "\n")
+  cat("Alpha (ARCH Parameter):", garch_params["alpha1"], "\n")
+  cat("Beta (GARCH Parameter):", garch_params["beta1"], "\n")
+  cat("#####################################\n")
+  
+  # Extract conditional volatility (sigma_t)
+  cond_vol <- sigma(garch_fit)
+  time_index <- index(asset_returns)  # Get time index if xts object
+
+  # Create volatility plot
+  vol_plot <- ggplot(data = data.frame(Time = time_index, Volatility = cond_vol), aes(x = Time, y = Volatility)) +
+    geom_line(color = "blue") +
+    ggtitle(paste("Conditional Volatility (GARCH(1,1)) for", asset_name)) +
+    xlab("Time") + ylab("Conditional Volatility") +
+    theme_minimal()
+
+  print(vol_plot)  # Display plot
+}
+
+# Fit GARCH(1,1) models for each asset
+fit_garch_model("VAW", returns_xts$VAW)
+fit_garch_model("VDE", returns_xts$VDE)
+fit_garch_model("VFH", returns_xts$VFH)
+fit_garch_model("VIS", returns_xts$VIS)
+fit_garch_model("VPU", returns_xts$VPU)
+
+```
+The omega values for each marginal asset is almost 0, indicating that volatility mostly comes from past behavior rather than a constant baseline variance. Small alpha1 values suggest that new shocks (unexpected large returns) have almost no impact on volatility. High beta1 values suggest volatility is persistent, meaning that once volatility increases it stays high for a long time before decreasing. High beta values suggest that volatility clustrering is strong.
+
+If the ARCH test is insignificant but 
+𝛽is high:
+Likely long-term volatility persistence rather than short-term clustering.
+GARCH is preferred because it accounts for both effects.
+If the ARCH test is significant but 𝛽 is low:
+Suggests volatility spikes quickly but decays rapidly (short-lived ARCH effects).
+ARCH modeling (without GARCH) might be sufficient.
+If both are significant:
+Use GARCH(1,1) or higher-order GARCH models to capture both short-term and long-term effects.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
